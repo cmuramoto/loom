@@ -102,6 +102,11 @@ public class FileChannelImpl
     // IO alignment value for DirectIO
     private final int alignment;
 
+    // Huge page support.
+    // truncate must be called with a multiple of blockSize
+    // mmap must be called with a blockSize aligned offset and size multiple of blockSize
+    private final long blockSize;
+    
     // Cleanable with an action which closes this channel's file descriptor
     private final Cleanable closer;
 
@@ -140,6 +145,7 @@ public class FileChannelImpl
             this.alignment = -1;
         }
 
+        this.blockSize = nd.blockSize(fd, path);
         // Register a cleaning action if and only if there is no parent
         // as the parent will take care of closing the file descriptor.
         // FileChannel is used by the LambdaMetaFactory so a lambda cannot
@@ -1116,10 +1122,10 @@ public class FileChannelImpl
         protected final long size;
         protected final long cap;
         private final FileDescriptor fd;
-        private final int pagePosition;
+        private final long pagePosition;
 
         private Unmapper(long address, long size, long cap,
-                         FileDescriptor fd, int pagePosition)
+                         FileDescriptor fd, long pagePosition)
         {
             assert (address != 0);
             this.address = address;
@@ -1174,7 +1180,7 @@ public class FileChannelImpl
         static volatile long totalCapacity;
 
         public DefaultUnmapper(long address, long size, long cap,
-                               FileDescriptor fd, int pagePosition) {
+                               FileDescriptor fd, long pagePosition) {
             super(address, size, cap, fd, pagePosition);
             incrementStats();
         }
@@ -1207,7 +1213,7 @@ public class FileChannelImpl
         static volatile long totalCapacity;
 
         public SyncUnmapper(long address, long size, long cap,
-                            FileDescriptor fd, int pagePosition) {
+                            FileDescriptor fd, long pagePosition) {
             super(address, size, cap, fd, pagePosition);
             incrementStats();
         }
@@ -1232,6 +1238,12 @@ public class FileChannelImpl
         }
     }
 
+    private static long alignUp(long value, long alignment) {
+        long chunks = value / alignment + ((value % alignment) == 0L ? 0L : 1L);
+
+        return chunks * alignment;
+    }    
+    
     private static void unmap(MappedByteBuffer bb) {
         Cleaner cl = ((DirectBuffer)bb).cleaner();
         if (cl != null)
@@ -1294,7 +1306,7 @@ public class FileChannelImpl
     }
 
     private Unmapper mapInternal(MapMode mode, long position, long size, int prot, boolean isSync)
-        throws IOException
+            throws IOException
     {
         ensureOpen();
         if (mode == null)
@@ -1315,8 +1327,11 @@ public class FileChannelImpl
             if (!isOpen())
                 return null;
 
-            long mapSize;
-            int pagePosition;
+            long defaultBlockSize = nd.allocationGranularity();
+            long pagePosition = position % blockSize;
+            long mapPosition = position - pagePosition;
+            long mapSize = blockSize > defaultBlockSize ? alignUp(size + pagePosition, blockSize) : size + pagePosition;
+
             synchronized (positionLock) {
                 long filesize;
                 do {
@@ -1328,11 +1343,14 @@ public class FileChannelImpl
                 if (filesize < position + size) { // Extend file size
                     if (!writable) {
                         throw new IOException("Channel not open for writing " +
-                            "- cannot extend file to required size");
+                                "- cannot extend file to required size");
                     }
                     int rv;
+                    long truncLen = blockSize > defaultBlockSize ? alignUp(position + size, blockSize)
+                            : position + size;
+
                     do {
-                        rv = nd.truncate(fd, position + size);
+                        rv = nd.truncate(fd, truncLen);
                     } while ((rv == IOStatus.INTERRUPTED) && isOpen());
                     if (!isOpen())
                         return null;
@@ -1342,9 +1360,6 @@ public class FileChannelImpl
                     return null;
                 }
 
-                pagePosition = (int)(position % nd.allocationGranularity());
-                long mapPosition = position - pagePosition;
-                mapSize = size + pagePosition;
                 try {
                     // If map did not throw an exception, the address is valid
                     addr = nd.map(fd, prot, mapPosition, mapSize, isSync);
@@ -1379,8 +1394,8 @@ public class FileChannelImpl
             assert (IOStatus.checkAll(addr));
             assert (addr % nd.allocationGranularity() == 0);
             Unmapper um = (isSync
-                ? new SyncUnmapper(addr, mapSize, size, mfd, pagePosition)
-                : new DefaultUnmapper(addr, mapSize, size, mfd, pagePosition));
+                    ? new SyncUnmapper(addr, mapSize, size, mfd, pagePosition)
+                    : new DefaultUnmapper(addr, mapSize, size, mfd, pagePosition));
             return um;
         } finally {
             threads.remove(ti);

@@ -27,6 +27,7 @@ package sun.nio.ch;
 
 import java.io.FileDescriptor;
 import java.io.IOException;
+import java.nio.ByteBuffer;
 
 import jdk.internal.access.JavaIOFileDescriptorAccess;
 import jdk.internal.access.SharedSecrets;
@@ -164,6 +165,21 @@ class UnixFileDispatcherImpl extends FileDispatcher {
         }
         return result;
     }
+    
+    long blockSize(FileDescriptor fd, String path) {
+    	byte[] utf = jdk.internal.access.SharedSecrets.getJavaLangAccess().getBytesUTF8NoRepl(path);
+        ByteBuffer tmp = Util.getTemporaryDirectBuffer(utf.length + 1);
+        try {
+            tmp.put(utf);
+            tmp.put(utf.length, (byte)0);
+            
+            return blockSize0(((sun.nio.ch.DirectBuffer)tmp).address());
+        } catch(IOException e) {
+            return allocationGranularity();
+        } finally {
+            Util.releaseTemporaryDirectBuffer(tmp);    
+        }
+    }
 
     // -- Native methods --
 
@@ -213,4 +229,6 @@ class UnixFileDispatcherImpl extends FileDispatcher {
     static native int unmap0(long address, long length);
 
     static native int setDirect0(FileDescriptor fd) throws IOException;
+    
+    static native long blockSize0(long pathAddress) throws IOException;
 }
