@@ -99,14 +99,11 @@ public class FileChannelImpl
     // DirectIO flag
     private final boolean direct;
 
-    // IO alignment value for DirectIO
-    private final int alignment;
-
-    // Huge page support.
+    // IO alignment value for DirectIO and files under hugetlbfs.
     // truncate must be called with a multiple of blockSize
     // mmap must be called with a blockSize aligned offset and size multiple of blockSize
-    private final long blockSize;
-    
+    private final int alignment;
+
     // Cleanable with an action which closes this channel's file descriptor
     private final Cleanable closer;
 
@@ -142,10 +139,10 @@ public class FileChannelImpl
             assert path != null;
             this.alignment = nd.setDirectIO(fd, path);
         } else {
-            this.alignment = -1;
+            long blockSize = nd.blockSize(fd, path);
+            this.alignment = (blockSize > nd.allocationGranularity() && blockSize <= 0x40000000  && (blockSize & (blockSize - 1)) == 0) ? (int)blockSize : -1;
         }
 
-        this.blockSize = nd.blockSize(fd, path);
         // Register a cleaning action if and only if there is no parent
         // as the parent will take care of closing the file descriptor.
         // FileChannel is used by the LambdaMetaFactory so a lambda cannot
@@ -167,6 +164,10 @@ public class FileChannelImpl
     private void ensureOpen() throws IOException {
         if (!isOpen())
             throw new ClosedChannelException();
+    }
+
+    private boolean needsAlignment() {
+        return /* !direct && */ alignment > 0;
     }
 
     public void setUninterruptible() {
@@ -1122,10 +1123,10 @@ public class FileChannelImpl
         protected final long size;
         protected final long cap;
         private final FileDescriptor fd;
-        private final long pagePosition;
+        private final int pagePosition;
 
         private Unmapper(long address, long size, long cap,
-                         FileDescriptor fd, long pagePosition)
+                         FileDescriptor fd, int pagePosition)
         {
             assert (address != 0);
             this.address = address;
@@ -1180,7 +1181,7 @@ public class FileChannelImpl
         static volatile long totalCapacity;
 
         public DefaultUnmapper(long address, long size, long cap,
-                               FileDescriptor fd, long pagePosition) {
+                               FileDescriptor fd, int pagePosition) {
             super(address, size, cap, fd, pagePosition);
             incrementStats();
         }
@@ -1213,7 +1214,7 @@ public class FileChannelImpl
         static volatile long totalCapacity;
 
         public SyncUnmapper(long address, long size, long cap,
-                            FileDescriptor fd, long pagePosition) {
+                            FileDescriptor fd, int pagePosition) {
             super(address, size, cap, fd, pagePosition);
             incrementStats();
         }
@@ -1327,10 +1328,10 @@ public class FileChannelImpl
             if (!isOpen())
                 return null;
 
-            long defaultBlockSize = nd.allocationGranularity();
-            long pagePosition = position % blockSize;
+            boolean align = needsAlignment();
+            int pagePosition = (int)(align ? position % alignment : position % nd.allocationGranularity());
             long mapPosition = position - pagePosition;
-            long mapSize = blockSize > defaultBlockSize ? alignUp(size + pagePosition, blockSize) : size + pagePosition;
+            long mapSize = align ? alignUp(size + pagePosition, alignment) : size + pagePosition;
 
             synchronized (positionLock) {
                 long filesize;
@@ -1346,8 +1347,7 @@ public class FileChannelImpl
                                 "- cannot extend file to required size");
                     }
                     int rv;
-                    long truncLen = blockSize > defaultBlockSize ? alignUp(position + size, blockSize)
-                            : position + size;
+                    long truncLen = align ? alignUp(position + size, alignment) : position + size;
 
                     do {
                         rv = nd.truncate(fd, truncLen);

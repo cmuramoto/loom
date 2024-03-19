@@ -38,6 +38,8 @@ class UnixFileDispatcherImpl extends FileDispatcher {
     private static final int MAP_RW = 1;
     private static final int MAP_PV = 2;
 
+    private static long AG;
+
     static {
         IOUtil.load();
     }
@@ -127,7 +129,11 @@ class UnixFileDispatcherImpl extends FileDispatcher {
     }
 
     long allocationGranularity() {
-        return allocationGranularity0();
+        long rv = AG;
+        if (rv == 0) {
+            AG = rv = allocationGranularity0();
+        }        
+        return rv;
     }
 
     long map(FileDescriptor fd, int prot, long position, long length,
